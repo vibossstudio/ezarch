@@ -3,9 +3,24 @@
 # ═══════════════════════════════════════════════════════════
 #  ARCH LINUX AUTO INSTALLER
 #  Cài đặt Arch Linux hoàn toàn tự động qua TTY ArchISO
+#  Author: TYNO
+#  Website/Contact: (optional)
 # ═══════════════════════════════════════════════════════════
 
-set -e
+set -euo pipefail
+set -E
+
+# Cleanup mounts on exit to avoid leaving /mnt mounted
+trap 'umount -R /mnt 2>/dev/null || true' EXIT
+
+# Error handler: print failing command and exit
+on_error() {
+    local exit_code=$?
+    local cmd="${BASH_COMMAND:-unknown}"
+    print_error "Lỗi: lệnh '$cmd' trả về mã $exit_code (dòng ${BASH_LINENO[0]})"
+    exit $exit_code
+}
+trap on_error ERR
 
 # Màu sắc
 RED='\033[0;31m'
@@ -143,16 +158,17 @@ ask_yes_no() {
 
 check_environment() {
     print_header "KIỂM TRA MÔI TRƯỜNG"
-    
     # Kiểm tra chạy với quyền root
     if [[ $EUID -ne 0 ]]; then
         print_error "Script này cần chạy với quyền root!"
         exit 1
     fi
-    print_success "Hoàn thành phân vùng"
-    
-    sleep 2
-    partprobe "$DISK"
+
+    # Thông báo và refresh partition table (nếu đã biết DISK)
+    if [[ -n "${DISK:-}" ]]; then
+        sleep 1
+        partprobe "${DISK}"
+    fi
     
     # Xác định tên phân vùng
     if [[ "$DISK" =~ "nvme" ]]; then
@@ -161,6 +177,7 @@ check_environment() {
         local prefix="${DISK}"
     fi
     
+    # Set defaults based on naming convention; after partitioning we'll probe actual names
     if [[ "$BOOT_MODE" == "UEFI" ]]; then
         EFI_PARTITION="${prefix}1"
         if [[ "$CREATE_SWAP" == "yes" ]]; then
@@ -180,6 +197,96 @@ check_environment() {
             ROOT_PARTITION="${prefix}1"
             [[ "$SEPARATE_HOME" == "yes" ]] && HOME_PARTITION="${prefix}2"
         fi
+    fi
+
+    # Refresh and verify partition names — handle NVMe p# vs non-p#
+    partprobe "${DISK}"
+    sleep 1
+    # If NVMe, prefer p-suffixed partitions; verify actual devices exist
+    if [[ "${DISK}" =~ nvme ]]; then
+        if [[ -b "${DISK}p1" ]]; then
+            EFI_PARTITION="${DISK}p1"
+        fi
+        if [[ -b "${DISK}p2" ]]; then
+            SWAP_PARTITION="${DISK}p2"
+        fi
+        if [[ -b "${DISK}p3" ]]; then
+            ROOT_PARTITION="${DISK}p3"
+        fi
+        if [[ -b "${DISK}p4" ]]; then
+            HOME_PARTITION="${DISK}p4"
+        fi
+    else
+        if [[ -b "${DISK}1" ]]; then
+            EFI_PARTITION="${DISK}1"
+        fi
+        if [[ -b "${DISK}2" ]]; then
+            SWAP_PARTITION="${DISK}2"
+        fi
+        if [[ -b "${DISK}3" ]]; then
+            ROOT_PARTITION="${DISK}3"
+        fi
+        if [[ -b "${DISK}4" ]]; then
+            HOME_PARTITION="${DISK}4"
+        fi
+    fi
+}
+
+# Kiểm tra môi trường trước khi thu thập thông tin
+preflight_checks() {
+    print_header "KIỂM TRA MÔI TRƯỜNG CƠ BẢN"
+
+    if [[ $EUID -ne 0 ]]; then
+        print_error "Script này cần chạy với quyền root!"
+        exit 1
+    fi
+
+    # Chạy trên ArchISO?
+    if [[ ! -f /etc/arch-release ]]; then
+        print_error "Script này chỉ chạy trên ArchISO!"
+        exit 1
+    fi
+    print_success "Đang chạy trên ArchISO"
+
+    # Kiểm tra kết nối internet
+    print_info "Kiểm tra kết nối internet..."
+    if ping -c 1 archlinux.org &> /dev/null; then
+        print_success "Kết nối internet OK"
+    else
+        print_error "Không có kết nối internet!"
+        print_info "Vui lòng kết nối internet (dùng iwctl cho WiFi) và thử lại."
+        exit 1
+    fi
+
+    # Đồng bộ thời gian
+    print_info "Đồng bộ thời gian hệ thống..."
+    timedatectl set-ntp true
+    print_success "Đã đồng bộ thời gian"
+
+    echo
+    read -p "Nhấn Enter để tiếp tục..."
+
+    # Kiểm tra các công cụ cơ bản (cảnh báo nếu thiếu)
+    local cmds=(pacstrap genfstab arch-chroot parted sgdisk grub-install bootctl pacman reflector mkfs.fat mkfs.ext4 mkfs.btrfs mkfs.xfs mkfs.f2fs)
+    for c in "${cmds[@]}"; do
+        if ! command -v "$c" &> /dev/null; then
+            print_warning "$c không tìm thấy; một số bước có thể thất bại nếu thiếu"
+        fi
+    done
+}
+
+# Ensure required commands exist and optionally exit
+ensure_required_commands() {
+    local required=(pacstrap genfstab arch-chroot parted sgdisk timedatectl pacman)
+    local miss=()
+    for c in "${required[@]}"; do
+        if ! command -v "$c" &> /dev/null; then
+            miss+=("$c")
+        fi
+    done
+    if [[ ${#miss[@]} -gt 0 ]]; then
+        print_error "Thiếu công cụ bắt buộc: ${miss[*]}. Cài trước khi chạy script."
+        exit 1
     fi
 }
 
@@ -232,12 +339,12 @@ mount_partitions() {
     print_header "MOUNT PHÂN VÙNG"
     
     print_info "Mount root..."
-    local mount_opts=""
+    local -a mount_cmd=(mount)
     if [[ "$OPTIMIZE_SSD" == "yes" ]]; then
-        mount_opts="-o noatime,nodiratime"
+        mount_cmd+=( -o noatime,nodiratime )
     fi
-    
-    mount $mount_opts "$ROOT_PARTITION" /mnt
+    mount_cmd+=("$ROOT_PARTITION" /mnt)
+    "${mount_cmd[@]}"
     
     if [[ -n "$EFI_PARTITION" ]]; then
         print_info "Mount EFI..."
@@ -248,7 +355,11 @@ mount_partitions() {
     if [[ -n "$HOME_PARTITION" ]]; then
         print_info "Mount home..."
         mkdir -p /mnt/home
-        mount $mount_opts "$HOME_PARTITION" /mnt/home
+        if [[ "$OPTIMIZE_SSD" == "yes" ]]; then
+            mount -o noatime,nodiratime "$HOME_PARTITION" /mnt/home
+        else
+            mount "$HOME_PARTITION" /mnt/home
+        fi
     fi
     
     print_success "Hoàn thành mount"
@@ -263,7 +374,7 @@ update_mirrorlist() {
         print_header "CẬP NHẬT MIRRORLIST"
         print_info "Cập nhật mirrorlist với reflector..."
         
-        pacman -Sy --noconfirm reflector
+        pacman -S --noconfirm --needed reflector
         reflector --country Vietnam,Singapore,Japan,Korea --protocol https --sort rate --save /etc/pacman.d/mirrorlist
         
         print_success "Đã cập nhật mirrorlist"
@@ -272,69 +383,78 @@ update_mirrorlist() {
 
 install_base_system() {
     print_header "CÀI ĐẶT HỆ THỐNG CƠ BẢN"
-    
-    local packages="base linux linux-firmware"
-    
+    ensure_required_commands
+
+    local packages=(base linux linux-firmware)
+
     # Microcode
-    [[ "$CPU_VENDOR" == "intel" ]] && packages+=" intel-ucode"
-    [[ "$CPU_VENDOR" == "amd" ]] && packages+=" amd-ucode"
-    
+    if [[ "$CPU_VENDOR" == "intel" ]]; then
+        packages+=(intel-ucode)
+    elif [[ "$CPU_VENDOR" == "amd" ]]; then
+        packages+=(amd-ucode)
+    fi
+
     # Network tools
     case $NETWORK_MANAGER in
         networkmanager)
-            packages+=" networkmanager"
+            packages+=(networkmanager)
             ;;
         systemd-networkd)
-            packages+=" systemd-resolvconf"
+            packages+=(systemd-resolvconf)
             ;;
         iwd)
-            packages+=" iwd"
+            packages+=(iwd)
             ;;
     esac
-    
-    # Base utilities
-    packages+=" base-devel sudo man-db man-pages"
-    
+
+    # Base utilities (respect INSTALL_BASE_DEVEL)
+    if [[ "$INSTALL_BASE_DEVEL" == "yes" ]]; then
+        packages+=(base-devel)
+    fi
+    packages+=(sudo man-db man-pages)
+
     # Editor
-    [[ -n "$INSTALL_EDITOR" ]] && packages+=" $INSTALL_EDITOR"
-    
+    if [[ -n "$INSTALL_EDITOR" ]]; then
+        packages+=("$INSTALL_EDITOR")
+    fi
+
     # Additional tools
-    [[ "$INSTALL_GIT" == "yes" ]] && packages+=" git"
-    [[ "$INSTALL_WGET" == "yes" ]] && packages+=" wget curl"
-    [[ "$INSTALL_BASH_COMPLETION" == "yes" ]] && packages+=" bash-completion"
-    
+    [[ "$INSTALL_GIT" == "yes" ]] && packages+=(git)
+    [[ "$INSTALL_WGET" == "yes" ]] && packages+=(wget curl)
+    [[ "$INSTALL_BASH_COMPLETION" == "yes" ]] && packages+=(bash-completion)
+
     # GPU drivers
     case $GPU_DRIVER in
         intel)
-            packages+=" mesa lib32-mesa vulkan-intel lib32-vulkan-intel"
+            packages+=(mesa lib32-mesa vulkan-intel lib32-vulkan-intel)
             ;;
         amd)
-            packages+=" mesa lib32-mesa vulkan-radeon lib32-vulkan-radeon"
+            packages+=(mesa lib32-mesa vulkan-radeon lib32-vulkan-radeon)
             ;;
         nvidia-open)
-            packages+=" nvidia-open nvidia-utils lib32-nvidia-utils"
+            packages+=(nvidia-open nvidia-utils lib32-nvidia-utils)
             ;;
         nvidia)
-            packages+=" nvidia nvidia-utils lib32-nvidia-utils"
+            packages+=(nvidia nvidia-utils lib32-nvidia-utils)
             ;;
     esac
-    
+
     # Firewall
-    [[ "$ENABLE_FIREWALL" == "yes" ]] && packages+=" ufw"
-    
+    [[ "$ENABLE_FIREWALL" == "yes" ]] && packages+=(ufw)
+
     # SSH
-    [[ "$ENABLE_SSH" == "yes" ]] && packages+=" openssh"
-    
-    print_info "Cài đặt: $packages"
-    pacstrap /mnt $packages
-    
+    [[ "$ENABLE_SSH" == "yes" ]] && packages+=(openssh)
+
+    print_info "Cài đặt: ${packages[*]}"
+    pacstrap /mnt "${packages[@]}"
+
     print_success "Hoàn thành cài đặt base system"
 }
 
 generate_fstab() {
     print_header "TẠO FSTAB"
     
-    genfstab -U /mnt >> /mnt/etc/fstab
+    genfstab -U /mnt > /mnt/etc/fstab
     
     print_success "Đã tạo /etc/fstab"
 }
@@ -380,11 +500,12 @@ useradd -m -G wheel,audio,video,storage,optical -s /bin/bash $USERNAME
 echo "$USERNAME:$USER_PASSWORD" | chpasswd
 
 # Sudo
-if [[ "$ENABLE_SUDO" == "yes" ]]; then
-    echo "%wheel ALL=(ALL:ALL) NOPASSWD: ALL" >> /etc/sudoers
-else
-    echo "%wheel ALL=(ALL:ALL) ALL" >> /etc/sudoers
-fi
+    if [[ "$ENABLE_SUDO" == "yes" ]]; then
+        echo "%wheel ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/99-installer
+    else
+        echo "%wheel ALL=(ALL:ALL) ALL" > /etc/sudoers.d/99-installer
+    fi
+    chmod 0440 /etc/sudoers.d/99-installer
 
 # Enable services
 systemctl enable fstrim.timer
@@ -462,45 +583,45 @@ install_desktop_environment() {
     
     print_header "CÀI ĐẶT DESKTOP ENVIRONMENT"
     
-    local packages=""
-    
+    local -a packages=()
+
     case $DESKTOP_ENV in
         gnome)
-            packages="gnome gnome-extra"
+            packages+=(gnome gnome-extra)
             ;;
         plasma)
-            packages="plasma kde-applications"
+            packages+=(plasma kde-applications)
             ;;
         xfce)
-            packages="xfce4 xfce4-goodies"
+            packages+=(xfce4 xfce4-goodies)
             ;;
         lxqt)
-            packages="lxqt breeze-icons"
+            packages+=(lxqt breeze-icons)
             ;;
         cinnamon)
-            packages="cinnamon nemo-fileroller"
+            packages+=(cinnamon nemo-fileroller)
             ;;
         mate)
-            packages="mate mate-extra"
+            packages+=(mate mate-extra)
             ;;
     esac
-    
+
     case $DISPLAY_MANAGER in
         gdm)
-            packages+=" gdm"
+            packages+=(gdm)
             ;;
         sddm)
-            packages+=" sddm"
+            packages+=(sddm)
             ;;
         lightdm)
-            packages+=" lightdm lightdm-gtk-greeter"
+            packages+=(lightdm lightdm-gtk-greeter)
             ;;
     esac
-    
-    arch-chroot /mnt pacman -S --noconfirm $packages
-    
+
+    arch-chroot /mnt pacman -S --noconfirm "${packages[@]}"
+
     if [[ "$DISPLAY_MANAGER" != "none" ]]; then
-        arch-chroot /mnt systemctl enable $DISPLAY_MANAGER
+        arch-chroot /mnt systemctl enable "$DISPLAY_MANAGER"
     fi
     
     print_success "Hoàn thành cài đặt Desktop Environment"
@@ -515,24 +636,25 @@ install_aur_helper() {
     
     print_info "Cài đặt $AUR_HELPER cho user $USERNAME..."
     
-    # Tạo script cài AUR helper
+    # Tạo script cài AUR helper trong chroot, chạy dưới user thường
     cat << 'AUR_SCRIPT_EOF' > /mnt/install_aur.sh
 #!/bin/bash
 
 AUR_HELPER="$1"
 USERNAME="$2"
 
-# Chuyển sang user thường để build
-sudo -u $USERNAME bash << 'USER_EOF'
-cd /tmp
+sudo -u "$USERNAME" bash -s -- "$AUR_HELPER" <<'USER_EOF'
+AUR_HELPER="$1"
+cd /tmp || exit 1
 
-# Clone repository
 if [[ "$AUR_HELPER" == "yay" ]]; then
     git clone https://aur.archlinux.org/yay.git
-    cd yay
+    cd yay || exit 1
 elif [[ "$AUR_HELPER" == "paru" ]]; then
     git clone https://aur.archlinux.org/paru.git
-    cd paru
+    cd paru || exit 1
+else
+    exit 0
 fi
 
 # Build và install
@@ -545,7 +667,7 @@ rm -rf yay paru
 USER_EOF
 
 AUR_SCRIPT_EOF
-    
+
     chmod +x /mnt/install_aur.sh
     arch-chroot /mnt /install_aur.sh "$AUR_HELPER" "$USERNAME"
     rm /mnt/install_aur.sh
@@ -558,8 +680,9 @@ AUR_SCRIPT_EOF
 # ═══════════════════════════════════════════════════════════
 
 main() {
-    check_environment
-    
+    ensure_required_commands
+    preflight_checks
+
     collect_language_settings
     collect_time_settings
     collect_network_settings
@@ -572,6 +695,9 @@ main() {
     collect_desktop_settings
     collect_advanced_settings
     
+    # Sau khi đã có thông tin ổ đĩa, kiểm tra môi trường chi tiết
+    check_environment
+
     confirm_settings
     
     # Thực hiện cài đặt
@@ -594,6 +720,11 @@ main() {
     
     print_success "Arch Linux đã được cài đặt thành công!"
     echo
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "  Script viết bởi: ${BOLD}TYNO${NC}"
+    echo -e "  Cảm ơn bạn đã tin tưởng sử dụng!"
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+    echo
     print_info "Bạn có thể:"
     echo "  1. Reboot vào hệ thống mới"
     echo "  2. Kiểm tra cấu hình trong /mnt"
@@ -610,33 +741,7 @@ main() {
     fi
 }
 
-main "$@" "Chạy với quyền root"
-    
-    # Kiểm tra đang ở ArchISO
-    if [[ ! -f /etc/arch-release ]]; then
-        print_error "Script này chỉ chạy trên ArchISO!"
-        exit 1
-    fi
-    print_success "Đang chạy trên ArchISO"
-    
-    # Kiểm tra kết nối internet
-    print_info "Kiểm tra kết nối internet..."
-    if ping -c 1 archlinux.org &> /dev/null; then
-        print_success "Kết nối internet OK"
-    else
-        print_error "Không có kết nối internet!"
-        print_info "Vui lòng kết nối internet (dùng iwctl cho WiFi) và thử lại."
-        exit 1
-    fi
-    
-    # Đồng bộ thời gian
-    print_info "Đồng bộ thời gian hệ thống..."
-    timedatectl set-ntp true
-    print_success "Đã đồng bộ thời gian"
-    
-    echo
-    read -p "Nhấn Enter để tiếp tục..."
-}
+main "$@"
 
 # ═══════════════════════════════════════════════════════════
 #  THU THẬP THÔNG TIN
@@ -1144,24 +1249,27 @@ auto_partition() {
         parted -s "$DISK" set 1 esp on
         
         local part_num=2
-        
+
+        # Compute positions in MiB (EFI ends at 513MiB)
+        local root_start=513
         if [[ "$CREATE_SWAP" == "yes" ]]; then
             local swap_end=$((513 + SWAP_SIZE * 1024))
             print_info "Tạo phân vùng swap (${SWAP_SIZE}GB)..."
             parted -s "$DISK" mkpart primary linux-swap 513MiB ${swap_end}MiB
             part_num=3
+            root_start=$swap_end
         fi
-        
+
         if [[ "$SEPARATE_HOME" == "yes" ]]; then
             print_info "Tạo phân vùng root (50GB)..."
-            local root_end=$((513 + (CREATE_SWAP == "yes" ? SWAP_SIZE * 1024 : 0) + 50 * 1024))
-            parted -s "$DISK" mkpart primary "$FILESYSTEM" $((513 + (CREATE_SWAP == "yes" ? SWAP_SIZE * 1024 : 0)))MiB ${root_end}MiB
-            
+            local root_end=$((root_start + 50 * 1024))
+            parted -s "$DISK" mkpart primary "$FILESYSTEM" ${root_start}MiB ${root_end}MiB
+
             print_info "Tạo phân vùng /home (phần còn lại)..."
             parted -s "$DISK" mkpart primary "$FILESYSTEM" ${root_end}MiB 100%
         else
             print_info "Tạo phân vùng root (phần còn lại)..."
-            parted -s "$DISK" mkpart primary "$FILESYSTEM" $((513 + (CREATE_SWAP == "yes" ? SWAP_SIZE * 1024 : 0)))MiB 100%
+            parted -s "$DISK" mkpart primary "$FILESYSTEM" ${root_start}MiB 100%
         fi
         
     else
@@ -1169,19 +1277,18 @@ auto_partition() {
         parted -s "$DISK" mklabel msdos
         
         local start_pos=1
-        
         if [[ "$CREATE_SWAP" == "yes" ]]; then
             local swap_end=$((1 + SWAP_SIZE * 1024))
             print_info "Tạo phân vùng swap (${SWAP_SIZE}GB)..."
             parted -s "$DISK" mkpart primary linux-swap 1MiB ${swap_end}MiB
             start_pos=$swap_end
         fi
-        
+
         if [[ "$SEPARATE_HOME" == "yes" ]]; then
             print_info "Tạo phân vùng root (50GB)..."
             local root_end=$((start_pos + 50 * 1024))
             parted -s "$DISK" mkpart primary "$FILESYSTEM" ${start_pos}MiB ${root_end}MiB
-            
+
             print_info "Tạo phân vùng /home (phần còn lại)..."
             parted -s "$DISK" mkpart primary "$FILESYSTEM" ${root_end}MiB 100%
         else
@@ -1192,4 +1299,16 @@ auto_partition() {
         parted -s "$DISK" set 1 boot on
     fi
     
+    # Final safety confirmation before destructive operations
+    local confirm_disk
+    echo
+    print_warning "LƯU Ý: auto_partition sẽ xóa toàn bộ dữ liệu trên $DISK"
+    read -p "Gõ chính xác đường dẫn ổ đĩa để xác nhận (ví dụ /dev/sda): " confirm_disk
+    if [[ "$confirm_disk" != "$DISK" ]]; then
+        print_error "Xác nhận không đúng. Hủy phân vùng tự động."
+        exit 1
+    fi
+
     print_success
+
+}
