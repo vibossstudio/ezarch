@@ -108,10 +108,10 @@ ask_question() {
     local answer
     
     if [[ -n "$default" ]]; then
-        read -p "$(echo -e ${CYAN}❯${NC} $question [${BOLD}$default${NC}]: )" answer
+        read -r -p "$(echo -e "${CYAN}❯${NC} ${question} [${BOLD}${default}${NC}]: ")" answer
         echo "${answer:-$default}"
     else
-        read -p "$(echo -e ${CYAN}❯${NC} $question: )" answer
+        read -r -p "$(echo -e "${CYAN}❯${NC} ${question}: ")" answer
         echo "$answer"
     fi
 }
@@ -122,9 +122,9 @@ ask_password() {
     local password_confirm
     
     while true; do
-        read -sp "$(echo -e ${CYAN}❯${NC} $prompt: )" password
+        read -r -s -p "$(echo -e "${CYAN}❯${NC} ${prompt}: ")" password
         echo
-        read -sp "$(echo -e ${CYAN}❯${NC} Xác nhận mật khẩu: )" password_confirm
+        read -r -s -p "$(echo -e "${CYAN}❯${NC} Xác nhận mật khẩu: ")" password_confirm
         echo
         
         if [[ "$password" == "$password_confirm" ]]; then
@@ -142,10 +142,10 @@ ask_yes_no() {
     local answer
     
     if [[ "$default" == "yes" ]]; then
-        read -p "$(echo -e ${CYAN}❯${NC} $question [${BOLD}Y/n${NC}]: )" answer
+        read -r -p "$(echo -e "${CYAN}❯${NC} ${question} [${BOLD}Y/n${NC}]: ")" answer
         answer="${answer:-y}"
     else
-        read -p "$(echo -e ${CYAN}❯${NC} $question [${BOLD}y/N${NC}]: )" answer
+        read -r -p "$(echo -e "${CYAN}❯${NC} ${question} [${BOLD}y/N${NC}]: ")" answer
         answer="${answer:-n}"
     fi
     
@@ -171,7 +171,7 @@ check_environment() {
     fi
     
     # Xác định tên phân vùng
-    if [[ "$DISK" =~ "nvme" ]]; then
+    if [[ "$DISK" == *nvme* ]]; then
         local prefix="${DISK}p"
     else
         local prefix="${DISK}"
@@ -203,7 +203,7 @@ check_environment() {
     partprobe "${DISK}"
     sleep 1
     # If NVMe, prefer p-suffixed partitions; verify actual devices exist
-    if [[ "${DISK}" =~ nvme ]]; then
+    if [[ "${DISK}" == *nvme* ]]; then
         if [[ -b "${DISK}p1" ]]; then
             EFI_PARTITION="${DISK}p1"
         fi
@@ -264,7 +264,7 @@ preflight_checks() {
     print_success "Đã đồng bộ thời gian"
 
     echo
-    read -p "Nhấn Enter để tiếp tục..."
+    read -r -p "Nhấn Enter để tiếp tục..."
 
     # Kiểm tra các công cụ cơ bản (cảnh báo nếu thiếu)
     local cmds=(pacstrap genfstab arch-chroot parted sgdisk grub-install bootctl pacman reflector mkfs.fat mkfs.ext4 mkfs.btrfs mkfs.xfs mkfs.f2fs)
@@ -277,7 +277,7 @@ preflight_checks() {
 
 # Ensure required commands exist and optionally exit
 ensure_required_commands() {
-    local required=(pacstrap genfstab arch-chroot parted sgdisk timedatectl pacman)
+    local required=(pacstrap genfstab arch-chroot parted sgdisk timedatectl pacman wipefs lsblk git makepkg)
     local miss=()
     for c in "${required[@]}"; do
         if ! command -v "$c" &> /dev/null; then
@@ -341,7 +341,7 @@ mount_partitions() {
     print_info "Mount root..."
     local -a mount_cmd=(mount)
     if [[ "$OPTIMIZE_SSD" == "yes" ]]; then
-        mount_cmd+=( -o noatime,nodiratime )
+        mount_cmd+=( -o "noatime,nodiratime" )
     fi
     mount_cmd+=("$ROOT_PARTITION" /mnt)
     "${mount_cmd[@]}"
@@ -496,7 +496,7 @@ else
 fi
 
 # Create user
-useradd -m -G wheel,audio,video,storage,optical -s /bin/bash $USERNAME
+useradd -m -G wheel,audio,video,storage,optical -s /bin/bash "$USERNAME"
 echo "$USERNAME:$USER_PASSWORD" | chpasswd
 
 # Sudo
@@ -669,6 +669,8 @@ USER_EOF
 AUR_SCRIPT_EOF
 
     chmod +x /mnt/install_aur.sh
+    # Ensure build tools available in chroot for AUR helper
+    arch-chroot /mnt pacman -S --noconfirm --needed base-devel git || true
     arch-chroot /mnt /install_aur.sh "$AUR_HELPER" "$USERNAME"
     rm /mnt/install_aur.sh
     
@@ -704,6 +706,12 @@ main() {
     if [[ "$PARTITION_MODE" == "auto" ]]; then
         auto_partition
     fi
+    # Refresh partition info after auto partitioning
+    if [[ "$PARTITION_MODE" == "auto" ]]; then
+        partprobe "$DISK"
+        sleep 1
+        check_environment
+    fi
     
     format_partitions
     mount_partitions
@@ -730,7 +738,8 @@ main() {
     echo "  2. Kiểm tra cấu hình trong /mnt"
     echo
     
-    local reboot_now=$(ask_yes_no "Reboot ngay bây giờ?" "yes")
+    local reboot_now
+    reboot_now=$(ask_yes_no "Reboot ngay bây giờ?" "yes")
     if [[ "$reboot_now" == "yes" ]]; then
         umount -R /mnt
         reboot
@@ -781,7 +790,8 @@ collect_network_settings() {
     echo "  2) systemd-networkd (nhẹ, phù hợp server)"
     echo "  3) iwd (modern, chỉ WiFi)"
     
-    local choice=$(ask_question "Chọn (1-3)" "1")
+    local choice
+    choice=$(ask_question "Chọn (1-3)" "1")
     case $choice in
         1) NETWORK_MANAGER="networkmanager" ;;
         2) NETWORK_MANAGER="systemd-networkd" ;;
@@ -815,7 +825,8 @@ collect_disk_settings() {
     lsblk "$DISK"
     echo
     
-    local confirm=$(ask_yes_no "Bạn có chắc chắn muốn xóa toàn bộ dữ liệu trên $DISK?" "no")
+    local confirm
+    confirm=$(ask_yes_no "Bạn có chắc chắn muốn xóa toàn bộ dữ liệu trên $DISK?" "no")
     if [[ "$confirm" != "yes" ]]; then
         print_error "Hủy cài đặt."
         exit 1
@@ -832,7 +843,8 @@ collect_partition_settings() {
     echo "  2) Thủ công"
     echo
     
-    local choice=$(ask_question "Chọn (1-2)" "1")
+    local choice
+    choice=$(ask_question "Chọn (1-2)" "1")
     [[ "$choice" == "2" ]] && PARTITION_MODE="manual" || PARTITION_MODE="auto"
     
     if [[ "$PARTITION_MODE" == "auto" ]]; then
@@ -856,7 +868,8 @@ collect_auto_partition_settings() {
         print_info "Phát hiện hệ thống BIOS"
     fi
     
-    local confirm_boot=$(ask_yes_no "Sử dụng chế độ $BOOT_MODE?" "yes")
+    local confirm_boot
+    confirm_boot=$(ask_yes_no "Sử dụng chế độ $BOOT_MODE?" "yes")
     if [[ "$confirm_boot" != "yes" ]]; then
         [[ "$BOOT_MODE" == "UEFI" ]] && BOOT_MODE="BIOS" || BOOT_MODE="UEFI"
     fi
@@ -869,7 +882,8 @@ collect_auto_partition_settings() {
     echo "  3) xfs (hiệu năng cao)"
     echo "  4) f2fs (tối ưu cho SSD/eMMC)"
     
-    local fs_choice=$(ask_question "Chọn (1-4)" "1")
+    local fs_choice
+    fs_choice=$(ask_question "Chọn (1-4)" "1")
     case $fs_choice in
         2) FILESYSTEM="btrfs" ;;
         3) FILESYSTEM="xfs" ;;
@@ -889,7 +903,8 @@ collect_swap_settings() {
     CREATE_SWAP=$(ask_yes_no "Tạo phân vùng swap?" "yes")
     
     if [[ "$CREATE_SWAP" == "yes" ]]; then
-        local ram_gb=$(free -g | awk '/Mem:/ {print $2}')
+        local ram_gb
+        ram_gb=$(free -g | awk '/Mem:/ {print $2}')
         local recommend_swap
         
         if [[ $ram_gb -le 2 ]]; then
@@ -907,7 +922,15 @@ collect_swap_settings() {
         print_info "RAM hiện tại: ${ram_gb}GB"
         print_info "Gợi ý swap: ${recommend_swap}GB"
         
-        SWAP_SIZE=$(ask_question "Nhập kích thước swap (GB)" "$recommend_swap")
+        # Validate swap size is a positive integer
+        while true; do
+            SWAP_SIZE=$(ask_question "Nhập kích thước swap (GB)" "$recommend_swap")
+            if [[ "$SWAP_SIZE" =~ ^[0-9]+$ && "$SWAP_SIZE" -ge 0 ]]; then
+                break
+            else
+                print_error "Kích thước swap không hợp lệ. Vui lòng nhập số nguyên dương (ví dụ 2)."
+            fi
+        done
     fi
 }
 
@@ -925,7 +948,7 @@ collect_manual_partition_settings() {
     echo "  - Swap: Tùy chọn"
     echo
     
-    read -p "Nhấn Enter để mở shell phân vùng..."
+    read -r -p "Nhấn Enter để mở shell phân vùng..."
     
     # Mở subshell để phân vùng
     bash
@@ -954,13 +977,15 @@ collect_manual_partition_settings() {
         EFI_PARTITION="/dev/$EFI_PARTITION"
     fi
     
-    local has_swap=$(ask_yes_no "Có phân vùng swap?" "no")
+    local has_swap
+    has_swap=$(ask_yes_no "Có phân vùng swap?" "no")
     if [[ "$has_swap" == "yes" ]]; then
         SWAP_PARTITION=$(ask_question "Phân vùng swap (vd: sda3, nvme0n1p3)")
         SWAP_PARTITION="/dev/$SWAP_PARTITION"
     fi
     
-    local has_home=$(ask_yes_no "Có phân vùng /home riêng?" "no")
+    local has_home
+    has_home=$(ask_yes_no "Có phân vùng /home riêng?" "no")
     if [[ "$has_home" == "yes" ]]; then
         HOME_PARTITION=$(ask_question "Phân vùng /home (vd: sda4, nvme0n1p4)")
         HOME_PARTITION="/dev/$HOME_PARTITION"
@@ -976,7 +1001,8 @@ collect_bootloader_settings() {
     echo "  3) Không cài (tự cài sau)"
     echo
     
-    local choice=$(ask_question "Chọn (1-3)" "1")
+    local choice
+    choice=$(ask_question "Chọn (1-3)" "1")
     case $choice in
         2) BOOTLOADER="systemd-boot" ;;
         3) BOOTLOADER="none" ;;
@@ -999,7 +1025,8 @@ collect_driver_settings() {
     echo "  2) AMD"
     echo
     
-    local cpu_choice=$(ask_question "Chọn (1-2)" "1")
+    local cpu_choice
+    cpu_choice=$(ask_question "Chọn (1-2)" "1")
     [[ "$cpu_choice" == "2" ]] && CPU_VENDOR="amd" || CPU_VENDOR="intel"
     
     echo
@@ -1011,7 +1038,8 @@ collect_driver_settings() {
     echo "  5) Không cài (dùng driver mặc định)"
     echo
     
-    local gpu_choice=$(ask_question "Chọn (1-5)" "5")
+    local gpu_choice
+    gpu_choice=$(ask_question "Chọn (1-5)" "5")
     case $gpu_choice in
         1) GPU_DRIVER="intel" ;;
         2) GPU_DRIVER="amd" ;;
@@ -1059,7 +1087,8 @@ collect_package_settings() {
     echo "  3) nano"
     echo "  4) Không cài"
     
-    local editor_choice=$(ask_question "Chọn (1-4)" "2")
+    local editor_choice
+    editor_choice=$(ask_question "Chọn (1-4)" "2")
     case $editor_choice in
         1) INSTALL_EDITOR="vim" ;;
         2) INSTALL_EDITOR="neovim" ;;
@@ -1081,7 +1110,8 @@ collect_package_settings() {
         echo "  1) yay (Go, nhanh, phổ biến nhất)"
         echo "  2) paru (Rust, tính năng nhiều hơn)"
         
-        local aur_choice=$(ask_question "Chọn (1-2)" "1")
+        local aur_choice
+        aur_choice=$(ask_question "Chọn (1-2)" "1")
         [[ "$aur_choice" == "2" ]] && AUR_HELPER="paru" || AUR_HELPER="yay"
     fi
     
@@ -1103,7 +1133,8 @@ collect_desktop_settings() {
         echo "  5) Cinnamon"
         echo "  6) MATE"
         
-        local de_choice=$(ask_question "Chọn (1-6)" "1")
+        local de_choice
+        de_choice=$(ask_question "Chọn (1-6)" "1")
         case $de_choice in
             2) DESKTOP_ENV="plasma" ;;
             3) DESKTOP_ENV="xfce" ;;
@@ -1120,7 +1151,8 @@ collect_desktop_settings() {
         echo "  3) LightDM (nhẹ, đa năng)"
         echo "  4) Không dùng (startx thủ công)"
         
-        local dm_choice=$(ask_question "Chọn (1-4)" "1")
+        local dm_choice
+        dm_choice=$(ask_question "Chọn (1-4)" "1")
         case $dm_choice in
             2) DISPLAY_MANAGER="sddm" ;;
             3) DISPLAY_MANAGER="lightdm" ;;
@@ -1222,7 +1254,8 @@ confirm_settings() {
     echo "  Tối ưu SSD: $OPTIMIZE_SSD"
     echo
     
-    local confirm=$(ask_yes_no "Xác nhận bắt đầu cài đặt?" "yes")
+    local confirm
+    confirm=$(ask_yes_no "Xác nhận bắt đầu cài đặt?" "yes")
     if [[ "$confirm" != "yes" ]]; then
         print_error "Hủy cài đặt."
         exit 0
@@ -1240,7 +1273,7 @@ auto_partition() {
     local confirm_disk
     echo
     print_warning "LƯU Ý: auto_partition sẽ xóa toàn bộ dữ liệu trên $DISK"
-    read -p "Gõ chính xác đường dẫn ổ đĩa để xác nhận (ví dụ /dev/sda): " confirm_disk
+    read -r -p "Gõ chính xác đường dẫn ổ đĩa để xác nhận (ví dụ /dev/sda): " confirm_disk
     if [[ "$confirm_disk" != "$DISK" ]]; then
         print_error "Xác nhận không đúng. Hủy phân vùng tự động."
         exit 1
@@ -1258,7 +1291,7 @@ auto_partition() {
         parted -s "$DISK" mkpart primary fat32 1MiB 513MiB
         parted -s "$DISK" set 1 esp on
         
-        local part_num=2
+        # partition numbering handled via device node checks later
 
         # Compute positions in MiB (EFI ends at 513MiB)
         local root_start=513
@@ -1266,7 +1299,7 @@ auto_partition() {
             local swap_end=$((513 + SWAP_SIZE * 1024))
             print_info "Tạo phân vùng swap (${SWAP_SIZE}GB)..."
             parted -s "$DISK" mkpart primary linux-swap 513MiB ${swap_end}MiB
-            part_num=3
+            :
             root_start=$swap_end
         fi
 
