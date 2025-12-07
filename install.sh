@@ -1236,6 +1236,16 @@ confirm_settings() {
 auto_partition() {
     print_header "PHÂN VÙNG TỰ ĐỘNG"
     
+    # Yêu cầu xác nhận trước khi thực hiện mọi thao tác phá hủy
+    local confirm_disk
+    echo
+    print_warning "LƯU Ý: auto_partition sẽ xóa toàn bộ dữ liệu trên $DISK"
+    read -p "Gõ chính xác đường dẫn ổ đĩa để xác nhận (ví dụ /dev/sda): " confirm_disk
+    if [[ "$confirm_disk" != "$DISK" ]]; then
+        print_error "Xác nhận không đúng. Hủy phân vùng tự động."
+        exit 1
+    fi
+
     print_info "Xóa toàn bộ dữ liệu trên $DISK..."
     wipefs -af "$DISK"
     sgdisk --zap-all "$DISK"
@@ -1299,16 +1309,6 @@ auto_partition() {
         parted -s "$DISK" set 1 boot on
     fi
     
-    # Final safety confirmation before destructive operations
-    local confirm_disk
-    echo
-    print_warning "LƯU Ý: auto_partition sẽ xóa toàn bộ dữ liệu trên $DISK"
-    read -p "Gõ chính xác đường dẫn ổ đĩa để xác nhận (ví dụ /dev/sda): " confirm_disk
-    if [[ "$confirm_disk" != "$DISK" ]]; then
-        print_error "Xác nhận không đúng. Hủy phân vùng tự động."
-        exit 1
-    fi
-
     print_success
 
 }
