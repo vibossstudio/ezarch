@@ -4,7 +4,6 @@
 #  ARCH LINUX AUTO INSTALLER
 #  Cài đặt Arch Linux hoàn toàn tự động qua TTY ArchISO
 #  Author: TYNO
-#  Website/Contact: (optional)
 # ═══════════════════════════════════════════════════════════
 
 set -euo pipefail
