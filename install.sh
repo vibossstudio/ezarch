@@ -78,27 +78,32 @@ OPTIMIZE_SSD=""
 # ═══════════════════════════════════════════════════════════
 
 print_header() {
+    local title="${1:-}"
     clear
     echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
-    echo -e "${BOLD}  $1${NC}"
+    echo -e "${BOLD}  ${title}${NC}"
     echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
     echo
 }
 
 print_info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
+    local msg="${1:-}"
+    echo -e "${BLUE}[INFO]${NC} ${msg}"
 }
 
 print_success() {
-    echo -e "${GREEN}[✓]${NC} $1"
+    local msg="${1:-}"
+    echo -e "${GREEN}[✓]${NC} ${msg}"
 }
 
 print_error() {
-    echo -e "${RED}[✗]${NC} $1"
+    local msg="${1:-}"
+    echo -e "${RED}[✗]${NC} ${msg}"
 }
 
 print_warning() {
-    echo -e "${YELLOW}[!]${NC} $1"
+    local msg="${1:-}"
+    echo -e "${YELLOW}[!]${NC} ${msg}"
 }
 
 ask_question() {
@@ -116,7 +121,7 @@ ask_question() {
 }
 
 ask_password() {
-    local prompt="$1"
+    local prompt="${1:-}"
     local password
     local password_confirm
     
