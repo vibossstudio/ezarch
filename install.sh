@@ -749,7 +749,7 @@ main() {
     fi
 }
 
-main "$@"
+    # Defer invocation until all functions are defined; called at EOF
 
 # ═══════════════════════════════════════════════════════════
 #  THU THẬP THÔNG TIN
@@ -1344,3 +1344,6 @@ auto_partition() {
     print_success
 
 }
+
+# Invoke main after all helper functions are defined
+main "$@"
