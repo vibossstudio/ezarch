@@ -1318,6 +1318,18 @@ auto_partition() {
     print_info "Xóa toàn bộ dữ liệu trên $DISK..."
     wipefs -af "$DISK"
     sgdisk --zap-all "$DISK"
+    # Đồng bộ partition table với kernel trước khi tiếp tục
+    print_info "Đồng bộ partition table với kernel..."
+    partprobe "$DISK" || true
+    # Ensure udev settles device changes
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm settle || true
+    fi
+    # Attempt to reread partition table
+    if command -v blockdev >/dev/null 2>&1; then
+        blockdev --rereadpt "$DISK" 2>/dev/null || true
+    fi
+    sleep 1
     
     if [[ "$BOOT_MODE" == "UEFI" ]]; then
         print_info "Tạo bảng phân vùng GPT..."
