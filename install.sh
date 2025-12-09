@@ -72,6 +72,8 @@ ENABLE_LUKS=""
 ENABLE_FIREWALL=""
 ENABLE_SSH=""
 OPTIMIZE_SSD=""
+IS_VM=""
+VIRTUALIZATION_TYPE=""
 
 # ═══════════════════════════════════════════════════════════
 #  HELPER FUNCTIONS
@@ -154,6 +156,40 @@ ask_yes_no() {
     fi
     
     [[ "$answer" =~ ^[Yy]$ ]] && echo "yes" || echo "no"
+}
+
+# Detect virtualization (VM) or physical machine
+detect_virtualization() {
+    IS_VM="no"
+    VIRTUALIZATION_TYPE="none"
+
+    if command -v systemd-detect-virt >/dev/null 2>&1; then
+        local v
+        v=$(systemd-detect-virt || true)
+        if [[ -n "${v}" && "${v}" != "none" ]]; then
+            IS_VM="yes"
+            VIRTUALIZATION_TYPE="${v}"
+        fi
+    else
+        # Fallback: check DMI/sys_vendor and product_name
+        if [[ -r /sys/class/dmi/id/product_name ]] || [[ -r /sys/class/dmi/id/sys_vendor ]]; then
+            local prod sv
+            prod=$(tr -d '\0' < /sys/class/dmi/id/product_name 2>/dev/null || true)
+            sv=$(tr -d '\0' < /sys/class/dmi/id/sys_vendor 2>/dev/null || true)
+            local combined
+            combined="${sv} ${prod}"
+            if echo "${combined}" | grep -Eiq 'virtualbox|vbox|qemu|kvm|vmware|microsoft|xen|bochs|parallels|bhyve|amazon'; then
+                IS_VM="yes"
+                VIRTUALIZATION_TYPE="${combined}"
+            fi
+        fi
+    fi
+
+    if [[ "${IS_VM:-}" == "yes" ]]; then
+        print_info "Đang chạy trong máy ảo: ${VIRTUALIZATION_TYPE}"
+    else
+        print_info "Đang chạy trên máy thật"
+    fi
 }
 
 # ═══════════════════════════════════════════════════════════
@@ -239,6 +275,9 @@ check_environment() {
 # Kiểm tra môi trường trước khi thu thập thông tin
 preflight_checks() {
     print_header "KIỂM TRA MÔI TRƯỜNG CƠ BẢN"
+
+    # Detect virtualization early so we can warn or adjust defaults
+    detect_virtualization
 
     if [[ $EUID -ne 0 ]]; then
         print_error "Script này cần chạy với quyền root!"
@@ -389,14 +428,8 @@ install_base_system() {
     print_header "CÀI ĐẶT HỆ THỐNG CƠ BẢN"
     ensure_required_commands
 
-    local packages=(base linux linux-firmware)
-
-    # Microcode
-    if [[ "$CPU_VENDOR" == "intel" ]]; then
-        packages+=(intel-ucode)
-    elif [[ "$CPU_VENDOR" == "amd" ]]; then
-        packages+=(amd-ucode)
-    fi
+    # Use Arch defaults for firmware and microcode; do not force-install them here
+    local packages=(base linux)
 
     # Network tools
     case $NETWORK_MANAGER in
@@ -560,7 +593,6 @@ install_bootloader() {
             cat << EOF > /mnt/boot/efi/loader/entries/arch.conf
 title   Arch Linux
 linux   /vmlinuz-linux
-initrd  /$CPU_VENDOR-ucode.img
 initrd  /initramfs-linux.img
 options root=$ROOT_PARTITION rw
 EOF
